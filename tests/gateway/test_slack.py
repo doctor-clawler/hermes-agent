@@ -96,10 +96,20 @@ def _redirect_cache(tmp_path, monkeypatch):
 class TestAppMentionHandler:
     """Verify that the app_mention event handler is registered."""
 
-    def test_app_mention_registered_on_connect(self):
+    def test_app_mention_registered_on_connect(self, tmp_path, monkeypatch):
         """connect() should register message + assistant lifecycle handlers."""
         config = PlatformConfig(enabled=True, token="xoxb-fake")
         adapter = SlackAdapter(config)
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "quick_commands:\n"
+            "  todo:\n"
+            "    type: deliver\n"
+            "    deliver: slack:CLOG\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
         # Track which events get registered
         registered_events = []
@@ -152,16 +162,17 @@ class TestAppMentionHandler:
         # covering every COMMAND_REGISTRY entry (e.g. /hermes, /btw, /stop,
         # /model, ...) so users get native-slash parity with Discord and
         # Telegram. Verify the regex matches the key expected slashes.
-        assert len(registered_commands) == 1, (
-            f"expected 1 combined slash matcher, got {registered_commands!r}"
+        assert len(registered_commands) == 2, (
+            f"expected combined slash matcher + quick command, got {registered_commands!r}"
         )
-        slash_matcher = registered_commands[0]
+        slash_matcher = next(cmd for cmd in registered_commands if not isinstance(cmd, str))
         import re as _re
         assert isinstance(slash_matcher, _re.Pattern)
         for expected in ("/hermes", "/btw", "/stop", "/model", "/help"):
             assert slash_matcher.match(expected), (
                 f"Slack slash regex does not match {expected}"
             )
+        assert "/todo" in registered_commands
 
 
 class TestSlackConnectCleanup:
@@ -2159,6 +2170,18 @@ class TestMessageSplitting:
         await adapter.send("C123", "**hello**")
         kwargs = adapter._app.client.chat_postMessage.call_args.kwargs
         assert kwargs.get("mrkdwn") is True
+
+    @pytest.mark.asyncio
+    async def test_send_honors_unfurl_metadata(self, adapter):
+        adapter._app.client.chat_postMessage = AsyncMock(return_value={"ts": "ts1"})
+        await adapter.send(
+            "C123",
+            "https://example.com",
+            metadata={"unfurl_links": False, "unfurl_media": False},
+        )
+        kwargs = adapter._app.client.chat_postMessage.call_args.kwargs
+        assert kwargs.get("unfurl_links") is False
+        assert kwargs.get("unfurl_media") is False
 
     @pytest.mark.asyncio
     async def test_send_does_not_double_escape_entities(self, adapter):

@@ -51,6 +51,25 @@ from gateway.platforms.base import (
 logger = logging.getLogger(__name__)
 
 
+def _load_slack_quick_command_names() -> list[str]:
+    """Load slash-command names for quick commands from config.yaml."""
+    try:
+        from hermes_cli.commands import _load_quick_commands
+
+        quick_commands = _load_quick_commands()
+    except Exception:
+        return []
+    if not isinstance(quick_commands, dict):
+        return []
+
+    names: list[str] = []
+    for name in quick_commands:
+        normalized = str(name or "").strip().lstrip("/")
+        if normalized:
+            names.append(normalized)
+    return names
+
+
 @dataclass
 class _ThreadContextCache:
     """Cache entry for fetched thread context."""
@@ -504,6 +523,17 @@ class SlackAdapter(BasePlatformAdapter):
             async def handle_hermes_command(ack, command):
                 await ack()
                 await self._handle_slash_command(command)
+
+            for quick_name in _load_slack_quick_command_names():
+                slash_name = f"/{quick_name}"
+
+                async def _handle_quick_command(ack, command, _slash_name=slash_name):
+                    await ack()
+                    payload = dict(command or {})
+                    payload.setdefault("command", _slash_name)
+                    await self._handle_slash_command(payload)
+
+                self._app.command(slash_name)(_handle_quick_command)
 
             # Register Block Kit action handlers for approval buttons
             for _action_id in (
@@ -2222,11 +2252,12 @@ class SlackAdapter(BasePlatformAdapter):
         what's the weather`` — non-slash text is treated as a regular
         message).
         """
-        slash_name = (command.get("command") or "").lstrip("/").strip()
         text = command.get("text", "").strip()
         user_id = command.get("user_id", "")
         channel_id = command.get("channel_id", "")
         team_id = command.get("team_id", "")
+        invoked_command = str(command.get("command") or "").strip()
+        slash_name = invoked_command.lstrip("/").strip()
         thread_ts = (
             command.get("thread_ts")
             or command.get("message", {}).get("thread_ts")
@@ -2247,6 +2278,7 @@ class SlackAdapter(BasePlatformAdapter):
             subcommand_map["compact"] = "/compress"
             first_word = text.split()[0] if text else ""
             if first_word in subcommand_map:
+                # Preserve arguments after the subcommand
                 rest = text[len(first_word):].strip()
                 text = f"{subcommand_map[first_word]} {rest}".strip() if rest else subcommand_map[first_word]
             elif text:
