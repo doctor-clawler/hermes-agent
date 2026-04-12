@@ -70,6 +70,18 @@ def _load_slack_quick_command_names() -> list[str]:
     return names
 
 
+def _build_slack_quick_command_handler(adapter: "SlackAdapter", slash_name: str):
+    """Create a Slack Bolt-compatible handler for a direct quick slash command."""
+
+    async def _handle_quick_command(ack, command):
+        await ack()
+        payload = dict(command or {})
+        payload.setdefault("command", slash_name)
+        await adapter._handle_slash_command(payload)
+
+    return _handle_quick_command
+
+
 @dataclass
 class _ThreadContextCache:
     """Cache entry for fetched thread context."""
@@ -526,14 +538,9 @@ class SlackAdapter(BasePlatformAdapter):
 
             for quick_name in _load_slack_quick_command_names():
                 slash_name = f"/{quick_name}"
-
-                async def _handle_quick_command(ack, command, _slash_name=slash_name):
-                    await ack()
-                    payload = dict(command or {})
-                    payload.setdefault("command", _slash_name)
-                    await self._handle_slash_command(payload)
-
-                self._app.command(slash_name)(_handle_quick_command)
+                self._app.command(slash_name)(
+                    _build_slack_quick_command_handler(self, slash_name)
+                )
 
             # Register Block Kit action handlers for approval buttons
             for _action_id in (
