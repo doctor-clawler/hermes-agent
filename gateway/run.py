@@ -4108,8 +4108,10 @@ class GatewayRunner:
                         # Fall through to normal command dispatch below
                     else:
                         return f"Quick command '/{command}' has no target defined."
+                elif qcmd.get("type") == "deliver":
+                    return await self._handle_quick_deliver_command(command, qcmd, event)
                 else:
-                    return f"Quick command '/{command}' has unsupported type (supported: 'exec', 'alias')."
+                    return f"Quick command '/{command}' has unsupported type (supported: 'exec', 'alias', 'deliver')."
 
         # Plugin-registered slash commands
         if command:
@@ -5347,6 +5349,129 @@ class GatewayRunner:
             lines.append(f"◆ Endpoint: {base_url}")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _summarize_thread_title(text: str, fallback: str = "현재 스레드") -> str:
+        """Convert raw Slack message text into a short thread title."""
+        cleaned = re.sub(r"\s+", " ", (text or "").strip())
+        if not cleaned:
+            return fallback
+        if len(cleaned) > 80:
+            return cleaned[:77].rstrip() + "..."
+        return cleaned
+
+    @staticmethod
+    def _format_slack_link(url: str, label: str) -> str:
+        """Return Slack mrkdwn link markup when both parts are available."""
+        if not url:
+            return ""
+        safe_label = (label or "링크").replace("|", "¦").replace(">", "›")
+        return f"<{url}|{safe_label}>"
+
+    async def _build_quick_command_template_values(
+        self,
+        command: str,
+        event: MessageEvent,
+    ) -> dict[str, str]:
+        """Build template variables for quick commands, enriching Slack threads."""
+
+        source = event.source
+        values: dict[str, str] = {
+            "args": event.get_command_args().strip(),
+            "command": command,
+            "user_id": getattr(source, "user_id", "") or "",
+            "user_name": getattr(source, "user_name", "") or "",
+            "platform": getattr(getattr(source, "platform", None), "value", "") or "",
+            "chat_id": getattr(source, "chat_id", "") or "",
+            "chat_type": getattr(source, "chat_type", "") or "",
+            "thread_id": getattr(source, "thread_id", "") or "",
+            "thread_title": "",
+            "thread_permalink": "",
+            "thread_latest_permalink": "",
+            "thread_link": "",
+        }
+
+        if getattr(getattr(source, "platform", None), "value", "") != "slack":
+            return values
+        if not values["chat_id"] or not values["thread_id"]:
+            return values
+
+        adapter = self.adapters.get(source.platform)
+        if not adapter or not hasattr(adapter, "_get_client"):
+            return values
+
+        try:
+            client = adapter._get_client(values["chat_id"])
+            replies = await client.conversations_replies(
+                channel=values["chat_id"],
+                ts=values["thread_id"],
+                inclusive=True,
+                limit=200,
+            )
+            messages = replies.get("messages") or []
+            if not messages:
+                return values
+
+            parent = messages[0]
+            latest = messages[-1]
+            title = self._summarize_thread_title(parent.get("text", ""))
+            latest_ts = latest.get("ts") or values["thread_id"]
+
+            permalink_resp = await client.chat_getPermalink(
+                channel=values["chat_id"],
+                message_ts=latest_ts,
+            )
+            latest_permalink = permalink_resp.get("permalink", "") or ""
+
+            values["thread_title"] = title
+            values["thread_permalink"] = latest_permalink
+            values["thread_latest_permalink"] = latest_permalink
+            values["thread_link"] = self._format_slack_link(latest_permalink, title)
+        except Exception:
+            logger.debug("Failed to enrich Slack quick-command thread context", exc_info=True)
+
+        return values
+
+    @staticmethod
+    def _format_quick_command_template(template: str, values: dict[str, str]) -> str:
+        """Render a quick-command template from precomputed values."""
+
+        class _SafeDict(dict):
+            def __missing__(self, key):
+                return ""
+
+        return template.format_map(_SafeDict(values)).strip()
+
+    async def _handle_quick_deliver_command(
+        self,
+        command: str,
+        qcmd: dict[str, Any],
+        event: MessageEvent,
+    ) -> str:
+        """Deliver a quick-command payload directly to one or more targets."""
+        deliver = qcmd.get("deliver") or qcmd.get("target")
+        if not deliver:
+            return f"Quick command '/{command}' has no deliver target defined."
+
+        template = str(qcmd.get("template") or "{args}")
+        template_values = await self._build_quick_command_template_values(command, event)
+        content = self._format_quick_command_template(template, template_values)
+        if not content:
+            return f"Quick command '/{command}' has no content to deliver."
+
+        targets = self.delivery_router.resolve_targets(deliver, origin=event.source)
+        if not targets:
+            return f"Quick command '/{command}' did not resolve any delivery targets."
+
+        metadata = {"unfurl_links": False, "unfurl_media": False}
+        results = await self.delivery_router.deliver(content, targets, metadata=metadata)
+        failed = [name for name, result in results.items() if not result.get("success")]
+        if failed:
+            failed_list = ", ".join(failed)
+            return f"Quick command '/{command}' failed for: {failed_list}."
+
+        delivered_to = ", ".join(target.to_string() for target in targets)
+        return f"Sent via '/{command}' to {delivered_to}."
 
     async def _handle_reset_command(self, event: MessageEvent) -> str:
         """Handle /new or /reset command."""

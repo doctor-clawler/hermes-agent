@@ -360,6 +360,22 @@ def _resolve_config_gates() -> set[str]:
     return result
 
 
+def _load_quick_commands() -> dict[str, Any]:
+    """Load user-defined quick commands from config.yaml.
+
+    Returns an empty dict on any error so gateway surfaces degrade gracefully.
+    """
+    try:
+        from hermes_cli.config import read_raw_config
+
+        cfg = read_raw_config()
+    except Exception:
+        return {}
+
+    quick_commands = cfg.get("quick_commands", {})
+    return quick_commands if isinstance(quick_commands, dict) else {}
+
+
 def _is_gateway_available(cmd: CommandDef, config_overrides: set[str] | None = None) -> bool:
     """Check if *cmd* should appear in gateway surfaces (help, menus, mappings).
 
@@ -392,6 +408,11 @@ def gateway_help_lines() -> list[str]:
             alias_parts.append(f"`/{a}`")
         alias_note = f" (alias: {', '.join(alias_parts)})" if alias_parts else ""
         lines.append(f"`/{cmd.name}{args}` -- {cmd.description}{alias_note}")
+    for name, spec in _load_quick_commands().items():
+        if not isinstance(spec, dict):
+            continue
+        description = str(spec.get("description") or f"Quick command ({spec.get('type', 'custom')})")
+        lines.append(f"`/{name}` -- {description}")
     return lines
 
 
@@ -936,6 +957,9 @@ def slack_subcommand_map() -> dict[str, str]:
     for name, _description, _args_hint in _iter_plugin_command_entries():
         if name not in mapping:
             mapping[name] = f"/{name}"
+
+    for name in _load_quick_commands():
+        mapping.setdefault(name, f"/{name}")
     return mapping
 
 

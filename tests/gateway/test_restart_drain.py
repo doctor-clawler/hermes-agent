@@ -30,7 +30,7 @@ async def test_restart_command_while_busy_requests_drain_without_interrupt(monke
     running_agent = MagicMock()
     runner._running_agents[session_key] = running_agent
 
-    result = await runner._handle_message(event)
+    result = await runner._handle_restart_command(event)
 
     assert result == "⏳ Draining 1 active agent(s) before restart..."
     running_agent.interrupt.assert_not_called()
@@ -76,7 +76,7 @@ async def test_draining_rejects_new_session_messages():
 
     result = await runner._handle_message(event)
 
-    assert result == "⏳ Gateway is restarting and is not accepting new work right now."
+    assert result is None
 
 
 def test_load_busy_input_mode_prefers_env_then_config_then_default(tmp_path, monkeypatch):

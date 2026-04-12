@@ -257,6 +257,21 @@ class TestSlackSubcommandMap:
             if cmd.cli_only and not cmd.gateway_config_gate:
                 assert cmd.name not in mapping
 
+    def test_includes_quick_commands_from_config(self, tmp_path, monkeypatch):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "quick_commands:\n"
+            "  todo:\n"
+            "    type: deliver\n"
+            "    deliver: slack:CLOG\n"
+            "    description: Send TODO items to the log channel\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        mapping = slack_subcommand_map()
+        assert mapping["todo"] == "/todo"
+
 
 class TestSlackNativeSlashes:
     """Slack native slash command generation — used to register every

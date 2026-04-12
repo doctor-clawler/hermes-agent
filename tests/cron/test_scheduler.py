@@ -314,6 +314,10 @@ class TestDeliverResultWrapping:
 
         sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
         assert "Cronjob Response: abc-123" in sent_content
+        assert send_mock.call_args.kwargs["metadata"] == {
+            "unfurl_links": False,
+            "unfurl_media": False,
+        }
 
     def test_delivery_skips_wrapping_when_config_disabled(self):
         """When cron.wrap_response is false, deliver raw content without header/footer."""
@@ -340,6 +344,10 @@ class TestDeliverResultWrapping:
         assert sent_content == "Clean output only."
         assert "Cronjob Response" not in sent_content
         assert "The agent cannot see" not in sent_content
+        assert send_mock.call_args.kwargs["metadata"] == {
+            "unfurl_links": False,
+            "unfurl_media": False,
+        }
 
     def test_delivery_extracts_media_tags_before_send(self):
         """Cron delivery should pass MEDIA attachments separately to the send helper."""

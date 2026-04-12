@@ -205,3 +205,91 @@ class TestGatewayQuickCommands:
         event = self._make_event("limits")
         result = await runner._handle_message(event)
         assert result == "ok"
+
+    @pytest.mark.asyncio
+    async def test_deliver_command_routes_via_delivery_router(self):
+        from gateway.run import GatewayRunner
+        from gateway.config import Platform
+
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner.config = {
+            "quick_commands": {
+                "todo": {
+                    "type": "deliver",
+                    "deliver": "slack:CLOG",
+                    "template": "TODO from {user_name}: {args}",
+                }
+            }
+        }
+        runner.adapters = {}
+        runner.delivery_router = MagicMock()
+        runner.delivery_router.resolve_targets.return_value = [MagicMock(to_string=lambda: "slack:clog")]
+        runner.delivery_router.deliver = AsyncMock(return_value={"slack:clog": {"success": True}})
+        runner._running_agents = {}
+        runner._pending_messages = {}
+        runner._is_user_authorized = MagicMock(return_value=True)
+
+        event = self._make_event("todo", "fix flaky test")
+        event.source.platform = Platform.SLACK
+        event.source.chat_id = "C123"
+        event.source.thread_id = "171.001"
+
+        result = await runner._handle_message(event)
+
+        runner.delivery_router.resolve_targets.assert_called_once_with("slack:CLOG", origin=event.source)
+        runner.delivery_router.deliver.assert_awaited_once()
+        deliver_args = runner.delivery_router.deliver.await_args
+        assert deliver_args.args[0] == "TODO from Test User: fix flaky test"
+        assert deliver_args.kwargs["metadata"]["unfurl_links"] is False
+        assert deliver_args.kwargs["metadata"]["unfurl_media"] is False
+        assert result == "Sent via '/todo' to slack:clog."
+
+    @pytest.mark.asyncio
+    async def test_deliver_command_uses_thread_title_with_latest_permalink(self):
+        from gateway.run import GatewayRunner
+        from gateway.config import Platform
+
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner.config = {
+            "quick_commands": {
+                "todo": {
+                    "type": "deliver",
+                    "deliver": "slack:CLOG",
+                    "template": "thread: {thread_link}\n{args}",
+                }
+            }
+        }
+
+        slack_adapter = MagicMock()
+        slack_client = MagicMock()
+        slack_client.conversations_replies = AsyncMock(return_value={
+            "messages": [
+                {"ts": "171.001", "text": "원본 스레드 제목입니다"},
+                {"ts": "171.002", "text": "중간 답변"},
+                {"ts": "171.003", "text": "가장 마지막 답변"},
+            ]
+        })
+        slack_client.chat_getPermalink = AsyncMock(return_value={
+            "permalink": "https://example.slack.com/archives/C123/p171003"
+        })
+        slack_adapter._get_client.return_value = slack_client
+
+        runner.adapters = {Platform.SLACK: slack_adapter}
+        runner.delivery_router = MagicMock()
+        runner.delivery_router.resolve_targets.return_value = [MagicMock(to_string=lambda: "slack:clog")]
+        runner.delivery_router.deliver = AsyncMock(return_value={"slack:clog": {"success": True}})
+        runner._running_agents = {}
+        runner._pending_messages = {}
+        runner._is_user_authorized = MagicMock(return_value=True)
+
+        event = self._make_event("todo", "다음 작업 진행")
+        event.source.platform = Platform.SLACK
+        event.source.chat_id = "C123"
+        event.source.thread_id = "171.001"
+
+        result = await runner._handle_message(event)
+
+        deliver_args = runner.delivery_router.deliver.await_args
+        assert deliver_args.args[0] == "thread: <https://example.slack.com/archives/C123/p171003|원본 스레드 제목입니다>\n다음 작업 진행"
+        slack_client.chat_getPermalink.assert_awaited_once_with(channel="C123", message_ts="171.003")
+        assert result == "Sent via '/todo' to slack:clog."

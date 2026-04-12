@@ -917,7 +917,7 @@ DEFAULT_CONFIG = {
 
     # Permanently allowed dangerous command patterns (added via "always" approval)
     "command_allowlist": [],
-    # User-defined quick commands that bypass the agent loop (type: exec only)
+    # User-defined quick commands that bypass the agent loop (type: exec, alias, or deliver)
     "quick_commands": {},
 
     # Shell-script hooks — declarative bridge that invokes shell scripts

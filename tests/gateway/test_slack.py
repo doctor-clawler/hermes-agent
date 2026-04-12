@@ -2017,6 +2017,18 @@ class TestSlashCommands:
         msg = adapter.handle_message.call_args[0][0]
         assert msg.text == "/reasoning"
 
+    @pytest.mark.asyncio
+    async def test_slash_command_preserves_thread_context(self, adapter):
+        command = {
+            "text": "usage",
+            "user_id": "U1",
+            "channel_id": "C1",
+            "thread_ts": "171.000",
+        }
+        await adapter._handle_slash_command(command)
+        msg = adapter.handle_message.call_args[0][0]
+        assert msg.source.thread_id == "171.000"
+
     # ------------------------------------------------------------------
     # Native slash commands — /btw, /stop, /model, ... dispatched directly
     # instead of as /hermes subcommands. This is the Discord/Telegram parity
@@ -2192,6 +2204,20 @@ class TestReplyBroadcast:
         await adapter.send("C123", "hi", metadata={"thread_id": "parent_ts"})
         kwargs = adapter._app.client.chat_postMessage.call_args.kwargs
         assert kwargs.get("reply_broadcast") is True
+
+    @pytest.mark.asyncio
+    async def test_send_respects_unfurl_metadata(self, adapter):
+        adapter._app.client.chat_postMessage = AsyncMock(return_value={"ts": "ts1"})
+
+        await adapter.send(
+            "C123",
+            "check https://example.com",
+            metadata={"unfurl_links": False, "unfurl_media": False},
+        )
+
+        kwargs = adapter._app.client.chat_postMessage.call_args.kwargs
+        assert kwargs["unfurl_links"] is False
+        assert kwargs["unfurl_media"] is False
 
 
 # ---------------------------------------------------------------------------

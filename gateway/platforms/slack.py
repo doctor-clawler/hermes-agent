@@ -577,12 +577,16 @@ class SlackAdapter(BasePlatformAdapter):
             # reply_broadcast: also post thread replies to the main channel.
             # Controlled via platform config: gateway.slack.reply_broadcast
             broadcast = self.config.extra.get("reply_broadcast", False)
+            unfurl_links = bool((metadata or {}).get("unfurl_links", True))
+            unfurl_media = bool((metadata or {}).get("unfurl_media", True))
 
             for i, chunk in enumerate(chunks):
                 kwargs = {
                     "channel": chat_id,
                     "text": chunk,
                     "mrkdwn": True,
+                    "unfurl_links": unfurl_links,
+                    "unfurl_media": unfurl_media,
                 }
                 if thread_ts:
                     kwargs["thread_ts"] = thread_ts
@@ -2223,6 +2227,12 @@ class SlackAdapter(BasePlatformAdapter):
         user_id = command.get("user_id", "")
         channel_id = command.get("channel_id", "")
         team_id = command.get("team_id", "")
+        thread_ts = (
+            command.get("thread_ts")
+            or command.get("message", {}).get("thread_ts")
+            or command.get("message", {}).get("ts")
+            or ""
+        )
 
         # Track which workspace owns this channel
         if team_id and channel_id:
@@ -2252,6 +2262,7 @@ class SlackAdapter(BasePlatformAdapter):
             chat_id=channel_id,
             chat_type="dm",  # Slash commands are always in DM-like context
             user_id=user_id,
+            thread_id=thread_ts or None,
         )
 
         event = MessageEvent(
