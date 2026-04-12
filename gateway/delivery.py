@@ -53,9 +53,10 @@ class DeliveryTarget:
         - "telegram" → Telegram home channel
         - "telegram:123456" → specific Telegram chat
         """
-        target = target.strip().lower()
+        target = target.strip()
+        normalized_target = target.lower()
         
-        if target == "origin":
+        if normalized_target == "origin":
             if origin:
                 return cls(
                     platform=origin.platform,
@@ -67,13 +68,13 @@ class DeliveryTarget:
                 # Fallback to local if no origin
                 return cls(platform=Platform.LOCAL, is_origin=True)
         
-        if target == "local":
+        if normalized_target == "local":
             return cls(platform=Platform.LOCAL)
         
         # Check for platform:chat_id or platform:chat_id:thread_id format
         if ":" in target:
             parts = target.split(":", 2)
-            platform_str = parts[0]
+            platform_str = parts[0].strip().lower()
             chat_id = parts[1] if len(parts) > 1 else None
             thread_id = parts[2] if len(parts) > 2 else None
             try:
@@ -85,7 +86,7 @@ class DeliveryTarget:
         
         # Just a platform name (use home channel)
         try:
-            platform = Platform(target)
+            platform = Platform(normalized_target)
             return cls(platform=platform)
         except ValueError:
             # Unknown platform, treat as local
@@ -123,6 +124,51 @@ class DeliveryRouter:
         self.config = config
         self.adapters = adapters or {}
         self.output_dir = get_hermes_home() / "cron" / "output"
+
+    def resolve_targets(
+        self,
+        deliver: Union[str, List[str], tuple],
+        origin: Optional[SessionSource] = None,
+    ) -> List[DeliveryTarget]:
+        """Resolve one or more delivery specifiers into concrete targets."""
+        if isinstance(deliver, str):
+            raw_targets = [part.strip() for part in deliver.split(",") if part.strip()]
+        elif isinstance(deliver, (list, tuple)):
+            raw_targets = [str(part).strip() for part in deliver if str(part).strip()]
+        else:
+            raw_targets = [str(deliver).strip()] if str(deliver).strip() else []
+
+        resolved: List[DeliveryTarget] = []
+        for raw_target in raw_targets:
+            target = DeliveryTarget.parse(raw_target, origin=origin)
+            if target.platform == Platform.LOCAL:
+                resolved.append(target)
+                continue
+
+            if target.chat_id:
+                resolved.append(target)
+                continue
+
+            home_channel = self.config.get_home_channel(target.platform)
+            if home_channel:
+                resolved.append(
+                    DeliveryTarget(
+                        platform=target.platform,
+                        chat_id=home_channel.chat_id,
+                        thread_id=target.thread_id,
+                        is_origin=target.is_origin,
+                        is_explicit=False,
+                    )
+                )
+                continue
+
+            logger.warning(
+                "No home channel configured for delivery target '%s' on platform '%s'",
+                raw_target,
+                target.platform.value,
+            )
+
+        return resolved
     
     async def deliver(
         self,

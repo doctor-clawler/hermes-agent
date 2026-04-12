@@ -2029,6 +2029,18 @@ class TestSlashCommands:
         assert msg.text == "/reasoning"
 
     @pytest.mark.asyncio
+    async def test_direct_todo_slash_command_passes_through(self, adapter):
+        command = {
+            "command": "/todo",
+            "text": "fix parser",
+            "user_id": "U1",
+            "channel_id": "C1",
+        }
+        await adapter._handle_slash_command(command)
+        msg = adapter.handle_message.call_args[0][0]
+        assert msg.text == "/todo fix parser"
+
+    @pytest.mark.asyncio
     async def test_slash_command_preserves_thread_context(self, adapter):
         command = {
             "text": "usage",
