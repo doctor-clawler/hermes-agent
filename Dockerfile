@@ -14,7 +14,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
 # that would otherwise accumulate when hermes runs as PID 1. See #15012.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        build-essential nodejs npm python3 ripgrep ffmpeg gcc python3-dev libffi-dev procps git openssh-client docker-cli tini && \
+    build-essential nodejs npm python3 ripgrep ffmpeg gcc python3-dev libffi-dev procps git openssh-client docker-cli tini && \
     rm -rf /var/lib/apt/lists/*
 
 # Non-root user for runtime; UID can be overridden via HERMES_UID at runtime
@@ -50,6 +50,7 @@ RUN cd web && npm run build && \
     rm -rf packages/hermes-ink/node_modules && \
     cp -R packages/hermes-ink node_modules/@hermes/ink && \
     npm install --omit=dev --prefer-offline --no-audit --prefix node_modules/@hermes/ink && \
+    rm -rf node_modules/@hermes/ink/node_modules/react && \
     node --input-type=module -e "await import('@hermes/ink')"
 
 # ---------- Permissions ----------
