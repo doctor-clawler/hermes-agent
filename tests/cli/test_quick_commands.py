@@ -1,6 +1,7 @@
 """Tests for user-defined quick commands that bypass the agent loop."""
+import asyncio
 import subprocess
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import ANY, MagicMock, patch, AsyncMock
 from rich.text import Text
 import pytest
 
@@ -58,6 +59,28 @@ class TestCLIQuickCommands:
         assert result is True
         # stderr fallback — should print something
         cli.console.print.assert_called_once()
+
+    def test_exec_command_argv_formats_args(self):
+        cli = self._make_cli({
+            "auto": {
+                "type": "exec",
+                "argv": ["python3", "script.py", "{args}"],
+            }
+        })
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="on\n", stderr="")
+            result = cli.process_command("/auto on")
+
+        assert result is True
+        mock_run.assert_called_once_with(
+            ["python3", "script.py", "on"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        cli.console.print.assert_called_once()
+        printed = self._printed_plain(cli.console.print.call_args[0][0])
+        assert printed == "on"
 
     def test_exec_command_no_output_shows_fallback(self):
         cli = self._make_cli({"empty": {"type": "exec", "command": "true"}})
@@ -158,6 +181,40 @@ class TestGatewayQuickCommands:
         event = self._make_event("limits")
         result = await runner._handle_message(event)
         assert result == "ok"
+
+    @pytest.mark.asyncio
+    async def test_exec_command_argv_formats_args(self):
+        from gateway.run import GatewayRunner
+
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner.config = {
+            "quick_commands": {
+                "auto": {
+                    "type": "exec",
+                    "argv": ["python3", "script.py", "{args}"],
+                }
+            }
+        }
+        runner._running_agents = {}
+        runner._pending_messages = {}
+        runner._is_user_authorized = MagicMock(return_value=True)
+        runner.adapters = {}
+
+        event = self._make_event("auto", "on")
+
+        mock_proc = MagicMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"on\n", b""))
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)) as mock_exec:
+            result = await runner._handle_message(event)
+
+        mock_exec.assert_awaited_once_with(
+            "python3",
+            "script.py",
+            "on",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assert result == "on"
 
     @pytest.mark.asyncio
     async def test_unsupported_type_returns_error(self):
@@ -293,3 +350,68 @@ class TestGatewayQuickCommands:
         assert deliver_args.args[0] == "thread: <https://example.slack.com/archives/C123/p171003|원본 스레드 제목입니다>\n다음 작업 진행"
         slack_client.chat_getPermalink.assert_awaited_once_with(channel="C123", message_ts="171.003")
         assert result == "Sent via '/todo' to slack:clog."
+
+    @pytest.mark.asyncio
+    async def test_cron_command_runs_existing_job_and_delivers_report(self):
+        from gateway.run import GatewayRunner
+
+        job = {
+            "id": "ef08a16e70f8",
+            "name": "works-manager-daily-focus-reminders",
+            "deliver": "slack:C0ARH1MHF4H",
+        }
+
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner.config = {
+            "quick_commands": {
+                "todo": {
+                    "type": "cron",
+                    "job_id": "ef08a16e70f8",
+                }
+            }
+        }
+        runner.adapters = {}
+        runner._running_agents = {}
+        runner._pending_messages = {}
+        runner._is_user_authorized = MagicMock(return_value=True)
+
+        event = self._make_event("todo")
+
+        with patch("gateway.run.get_job", return_value=job) as get_job_mock, \
+             patch("gateway.run.run_job", return_value=(True, "# output doc", "이어줘야 할 최근 스레드\n- foo", None)) as run_job_mock, \
+             patch("gateway.run.save_job_output") as save_output_mock, \
+             patch("gateway.run._deliver_result", return_value=None) as deliver_result_mock, \
+             patch("gateway.run.mark_job_run") as mark_job_run_mock:
+            result = await runner._handle_message(event)
+
+        assert result is None
+        get_job_mock.assert_called_once_with("ef08a16e70f8")
+        run_job_mock.assert_called_once_with(job)
+        save_output_mock.assert_called_once_with("ef08a16e70f8", "# output doc")
+        deliver_result_mock.assert_called_once_with(job, "이어줘야 할 최근 스레드\n- foo", adapters=runner.adapters, loop=ANY)
+        mark_job_run_mock.assert_called_once_with("ef08a16e70f8", True, None, delivery_error=None)
+
+    @pytest.mark.asyncio
+    async def test_cron_command_returns_error_when_job_is_missing(self):
+        from gateway.run import GatewayRunner
+
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner.config = {
+            "quick_commands": {
+                "todo": {
+                    "type": "cron",
+                    "job_id": "missing-job",
+                }
+            }
+        }
+        runner.adapters = {}
+        runner._running_agents = {}
+        runner._pending_messages = {}
+        runner._is_user_authorized = MagicMock(return_value=True)
+
+        event = self._make_event("todo")
+
+        with patch("gateway.run.get_job", return_value=None):
+            result = await runner._handle_message(event)
+
+        assert result == "Quick command '/todo' references unknown cron job 'missing-job'."

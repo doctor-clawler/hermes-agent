@@ -232,6 +232,73 @@ class TestAppMentionHandler:
         todo_handler = registered_handlers["/todo"]
         assert list(inspect.signature(todo_handler).parameters) == ["ack", "command"]
 
+    @pytest.mark.asyncio
+    async def test_quick_command_handler_sends_ephemeral_ack_text_when_configured(self, tmp_path, monkeypatch):
+        config = PlatformConfig(enabled=True, token="xoxb-fake")
+        adapter = SlackAdapter(config)
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "quick_commands:\n"
+            "  todo:\n"
+            "    type: cron\n"
+            "    job_id: ef08a16e70f8\n"
+            "    ack_text: \"리포트 생성 중입니다. 잠시 후 #로그에 올릴게요.\"\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        registered_handlers = {}
+
+        mock_app = MagicMock()
+
+        def mock_event(event_type):
+            def decorator(fn):
+                return fn
+            return decorator
+
+        def mock_command(cmd):
+            def decorator(fn):
+                registered_handlers[cmd] = fn
+                return fn
+            return decorator
+
+        mock_app.event = mock_event
+        mock_app.command = mock_command
+        mock_app.client = AsyncMock()
+        mock_app.client.auth_test = AsyncMock(return_value={
+            "user_id": "U_BOT",
+            "user": "testbot",
+        })
+
+        mock_web_client = AsyncMock()
+        mock_web_client.auth_test = AsyncMock(return_value={
+            "user_id": "U_BOT",
+            "user": "testbot",
+            "team_id": "T_FAKE",
+            "team": "FakeTeam",
+        })
+
+        with patch.object(_slack_mod, "AsyncApp", return_value=mock_app), \
+             patch.object(_slack_mod, "AsyncWebClient", return_value=mock_web_client), \
+             patch.object(_slack_mod, "AsyncSocketModeHandler", return_value=MagicMock()), \
+             patch.dict(os.environ, {"SLACK_APP_TOKEN": "xapp-fake"}), \
+             patch("gateway.status.acquire_scoped_lock", return_value=(True, None)), \
+             patch("asyncio.create_task"):
+            await adapter.connect()
+
+        adapter._handle_slash_command = AsyncMock()
+        ack = AsyncMock()
+        command = {"text": "", "user_id": "U1", "channel_id": "C1"}
+
+        await registered_handlers["/todo"](ack, command)
+
+        ack.assert_awaited_once_with({
+            "response_type": "ephemeral",
+            "text": "리포트 생성 중입니다. 잠시 후 #로그에 올릴게요.",
+        })
+        adapter._handle_slash_command.assert_awaited_once()
+
 
 class TestSlackConnectCleanup:
     """Regression coverage for failed connect() cleanup."""

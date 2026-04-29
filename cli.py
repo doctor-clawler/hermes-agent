@@ -6343,24 +6343,61 @@ class HermesCLI:
                 qcmd = quick_commands[base_cmd.lstrip("/")]
                 if qcmd.get("type") == "exec":
                     import subprocess
-                    exec_cmd = qcmd.get("command", "")
-                    if exec_cmd:
-                        try:
-                            result = subprocess.run(
-                                exec_cmd, shell=True, capture_output=True,
-                                text=True, timeout=30
-                            )
-                            output = result.stdout.strip() or result.stderr.strip()
-                            if output:
-                                self._console_print(_rich_text_from_ansi(output))
-                            else:
-                                self._console_print("[dim]Command returned no output[/]")
-                        except subprocess.TimeoutExpired:
-                            self._console_print("[bold red]Quick command timed out (30s)[/]")
-                        except Exception as e:
-                            self._console_print(f"[bold red]Quick command error: {e}[/]")
+                    exec_argv = qcmd.get("argv")
+                    if isinstance(exec_argv, list):
+                        user_args = cmd_original[len(base_cmd):].strip()
+
+                        class _SafeDict(dict):
+                            def __missing__(self, key):
+                                return ""
+
+                        values = {
+                            "args": user_args,
+                            "command": base_cmd.lstrip("/"),
+                        }
+                        formatted_argv = [
+                            str(part).format_map(_SafeDict(values)).strip()
+                            for part in exec_argv
+                        ]
+                        formatted_argv = [part for part in formatted_argv if part]
+                        if not formatted_argv:
+                            self._console_print(f"[bold red]Quick command '{base_cmd}' has no command defined[/]")
+                        else:
+                            try:
+                                result = subprocess.run(
+                                    formatted_argv,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=30,
+                                )
+                                output = result.stdout.strip() or result.stderr.strip()
+                                if output:
+                                    self._console_print(_rich_text_from_ansi(output))
+                                else:
+                                    self._console_print("[dim]Command returned no output[/]")
+                            except subprocess.TimeoutExpired:
+                                self._console_print("[bold red]Quick command timed out (30s)[/]")
+                            except Exception as e:
+                                self._console_print(f"[bold red]Quick command error: {e}[/]")
                     else:
-                        self._console_print(f"[bold red]Quick command '{base_cmd}' has no command defined[/]")
+                        exec_cmd = qcmd.get("command", "")
+                        if exec_cmd:
+                            try:
+                                result = subprocess.run(
+                                    exec_cmd, shell=True, capture_output=True,
+                                    text=True, timeout=30
+                                )
+                                output = result.stdout.strip() or result.stderr.strip()
+                                if output:
+                                    self._console_print(_rich_text_from_ansi(output))
+                                else:
+                                    self._console_print("[dim]Command returned no output[/]")
+                            except subprocess.TimeoutExpired:
+                                self._console_print("[bold red]Quick command timed out (30s)[/]")
+                            except Exception as e:
+                                self._console_print(f"[bold red]Quick command error: {e}[/]")
+                        else:
+                            self._console_print(f"[bold red]Quick command '{base_cmd}' has no command defined[/]")
                 elif qcmd.get("type") == "alias":
                     target = qcmd.get("target", "").strip()
                     if target:

@@ -1,3 +1,5 @@
+import asyncio
+import signal
 import pytest
 from unittest.mock import AsyncMock
 
@@ -213,7 +215,6 @@ async def test_start_gateway_replace_force_uses_terminate_pid(monkeypatch, tmp_p
     assert ok is True
     assert calls == [(42, False), (42, True)]
 
-
 @pytest.mark.asyncio
 async def test_start_gateway_replace_writes_takeover_marker_before_sigterm(
     monkeypatch, tmp_path
@@ -337,6 +338,71 @@ async def test_start_gateway_replace_clears_marker_on_permission_denied(
     assert ok is False
     # Marker must NOT be left behind
     assert not (tmp_path / ".gateway-takeover.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_start_gateway_sigusr1_requests_service_managed_restart(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    handlers = {}
+    restart_calls = []
+
+    class _Loop:
+        def add_signal_handler(self, sig, handler):
+            handlers[sig] = handler
+
+    class _NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+    class _SignalAwareRunner:
+        def __init__(self, config):
+            self.config = config
+            self.adapters = {}
+            self.should_exit_cleanly = False
+            self.should_exit_with_failure = False
+            self.exit_reason = None
+            self.exit_code = None
+
+        async def start(self):
+            return True
+
+        def request_restart(self, *, detached=False, via_service=False):
+            restart_calls.append((detached, via_service))
+            return True
+
+        async def wait_for_shutdown(self):
+            handlers[signal.SIGUSR1]()
+            await asyncio.sleep(0)
+
+    loop = _Loop()
+    monkeypatch.setattr("gateway.run.asyncio.get_event_loop", lambda: loop)
+    monkeypatch.setattr("gateway.run.asyncio.get_running_loop", lambda: loop)
+    monkeypatch.setattr("gateway.run.threading.Thread", _NoopThread)
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+    monkeypatch.setattr("gateway.status.write_pid_file", lambda: None)
+    monkeypatch.setattr("gateway.status.remove_pid_file", lambda: None)
+    monkeypatch.setenv("INVOCATION_ID", "systemd-unit")
+    monkeypatch.delenv("XPC_SERVICE_NAME", raising=False)
+    monkeypatch.delenv("NOTIFY_SOCKET", raising=False)
+    monkeypatch.setattr("tools.skills_sync.sync_skills", lambda quiet=True: None)
+    monkeypatch.setattr("tools.mcp_tool.shutdown_mcp_servers", lambda: None)
+    monkeypatch.setattr("hermes_logging.setup_logging", lambda hermes_home, mode: tmp_path)
+    monkeypatch.setattr("hermes_logging._add_rotating_handler", lambda *args, **kwargs: None)
+    monkeypatch.setattr("gateway.run.GatewayRunner", _SignalAwareRunner)
+
+    from gateway.run import start_gateway
+
+    ok = await start_gateway(config=GatewayConfig(), replace=False, verbosity=None)
+
+    assert ok is True
+    assert restart_calls == [(False, True)]
 
 
 def test_runner_warns_when_docker_gateway_lacks_explicit_output_mount(monkeypatch, tmp_path, caplog):

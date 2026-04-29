@@ -38,6 +38,27 @@ async def test_restart_command_while_busy_requests_drain_without_interrupt(monke
 
 
 @pytest.mark.asyncio
+async def test_restart_command_under_launchd_uses_service_restart_without_detached(monkeypatch):
+    monkeypatch.setenv("XPC_SERVICE_NAME", "ai.hermes.gateway")
+    runner, _adapter = make_restart_runner()
+    runner.request_restart = MagicMock(return_value=True)
+    event = MessageEvent(
+        text="/restart",
+        message_type=MessageType.TEXT,
+        source=make_restart_source(),
+        message_id="m1",
+    )
+
+    result = await runner._handle_restart_command(event)
+
+    assert result == (
+        "♻ Restarting gateway. If you aren't notified within 60 seconds, "
+        "restart from the console with `hermes gateway restart`."
+    )
+    runner.request_restart.assert_called_once_with(detached=False, via_service=True)
+
+
+@pytest.mark.asyncio
 async def test_drain_queue_mode_queues_follow_up_without_interrupt():
     runner, adapter = make_restart_runner()
     runner._draining = True
@@ -76,7 +97,7 @@ async def test_draining_rejects_new_session_messages():
 
     result = await runner._handle_message(event)
 
-    assert result is None
+    assert result == "⏳ Gateway is restarting and is not accepting new work right now."
 
 
 def test_load_busy_input_mode_prefers_env_then_config_then_default(tmp_path, monkeypatch):

@@ -51,30 +51,46 @@ from gateway.platforms.base import (
 logger = logging.getLogger(__name__)
 
 
-def _load_slack_quick_command_names() -> list[str]:
-    """Load slash-command names for quick commands from config.yaml."""
+def _load_slack_quick_command_specs() -> dict[str, dict]:
+    """Load Slack quick command specs from config.yaml."""
     try:
         from hermes_cli.commands import _load_quick_commands
 
         quick_commands = _load_quick_commands()
     except Exception:
-        return []
+        return {}
     if not isinstance(quick_commands, dict):
-        return []
+        return {}
 
-    names: list[str] = []
-    for name in quick_commands:
+    specs: dict[str, dict] = {}
+    for name, spec in quick_commands.items():
         normalized = str(name or "").strip().lstrip("/")
-        if normalized:
-            names.append(normalized)
-    return names
+        if normalized and isinstance(spec, dict):
+            specs[normalized] = spec
+    return specs
 
 
-def _build_slack_quick_command_handler(adapter: "SlackAdapter", slash_name: str):
+def _load_slack_quick_command_names() -> list[str]:
+    """Load slash-command names for quick commands from config.yaml."""
+    return list(_load_slack_quick_command_specs())
+
+
+def _build_slack_quick_command_handler(
+    adapter: "SlackAdapter",
+    slash_name: str,
+    spec: dict | None = None,
+):
     """Create a Slack Bolt-compatible handler for a direct quick slash command."""
 
     async def _handle_quick_command(ack, command):
-        await ack()
+        ack_text = str((spec or {}).get("ack_text") or "").strip()
+        if ack_text:
+            await ack({
+                "response_type": "ephemeral",
+                "text": ack_text,
+            })
+        else:
+            await ack()
         payload = dict(command or {})
         payload.setdefault("command", slash_name)
         await adapter._handle_slash_command(payload)
@@ -536,10 +552,10 @@ class SlackAdapter(BasePlatformAdapter):
                 await ack()
                 await self._handle_slash_command(command)
 
-            for quick_name in _load_slack_quick_command_names():
+            for quick_name, quick_spec in _load_slack_quick_command_specs().items():
                 slash_name = f"/{quick_name}"
                 self._app.command(slash_name)(
-                    _build_slack_quick_command_handler(self, slash_name)
+                    _build_slack_quick_command_handler(self, slash_name, quick_spec)
                 )
 
             # Register Block Kit action handlers for approval buttons

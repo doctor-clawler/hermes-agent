@@ -32,6 +32,8 @@ from datetime import datetime
 from typing import Dict, Optional, Any, List
 
 from agent.account_usage import fetch_account_usage, render_account_usage_lines
+from cron.jobs import get_job, mark_job_run, save_job_output
+from cron.scheduler import SILENT_MARKER, _deliver_result, run_job
 
 # --- Agent cache tuning ---------------------------------------------------
 # Bounds the per-session AIAgent cache to prevent unbounded growth in
@@ -303,6 +305,14 @@ from gateway.whatsapp_identity import (
     expand_whatsapp_aliases as _expand_whatsapp_auth_aliases,
     normalize_whatsapp_identifier as _normalize_whatsapp_identifier,
 )
+
+
+def _is_service_managed_gateway_process() -> bool:
+    """Return True when the current gateway process is owned by a service manager."""
+    xpc_service_name = os.getenv("XPC_SERVICE_NAME", "")
+    if xpc_service_name.startswith("ai.hermes.gateway"):
+        return True
+    return bool(os.getenv("INVOCATION_ID") or os.getenv("NOTIFY_SOCKET"))
 
 
 logger = logging.getLogger(__name__)
@@ -4080,6 +4090,29 @@ class GatewayRunner:
             if command in quick_commands:
                 qcmd = quick_commands[command]
                 if qcmd.get("type") == "exec":
+                    exec_argv = qcmd.get("argv")
+                    if isinstance(exec_argv, list):
+                        try:
+                            template_values = await self._build_quick_command_template_values(command, event)
+                            formatted_argv = [
+                                self._format_quick_command_template(str(part), template_values)
+                                for part in exec_argv
+                            ]
+                            formatted_argv = [part for part in formatted_argv if part]
+                            if not formatted_argv:
+                                return f"Quick command '/{command}' has no command defined."
+                            proc = await asyncio.create_subprocess_exec(
+                                *formatted_argv,
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE,
+                            )
+                            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                            output = (stdout or stderr).decode().strip()
+                            return output if output else "Command returned no output."
+                        except asyncio.TimeoutError:
+                            return "Quick command timed out (30s)."
+                        except Exception as e:
+                            return f"Quick command error: {e}"
                     exec_cmd = qcmd.get("command", "")
                     if exec_cmd:
                         try:
@@ -4110,8 +4143,10 @@ class GatewayRunner:
                         return f"Quick command '/{command}' has no target defined."
                 elif qcmd.get("type") == "deliver":
                     return await self._handle_quick_deliver_command(command, qcmd, event)
+                elif qcmd.get("type") == "cron":
+                    return await self._handle_quick_cron_command(command, qcmd)
                 else:
-                    return f"Quick command '/{command}' has unsupported type (supported: 'exec', 'alias', 'deliver')."
+                    return f"Quick command '/{command}' has unsupported type (supported: 'exec', 'alias', 'deliver', 'cron')."
 
         # Plugin-registered slash commands
         if command:
@@ -5473,6 +5508,52 @@ class GatewayRunner:
         delivered_to = ", ".join(target.to_string() for target in targets)
         return f"Sent via '/{command}' to {delivered_to}."
 
+    async def _handle_quick_cron_command(
+        self,
+        command: str,
+        qcmd: dict[str, Any],
+    ) -> Optional[str]:
+        """Run an existing cron job immediately and reuse its delivery flow."""
+        job_id = str(qcmd.get("job_id") or qcmd.get("job") or "").strip()
+        if not job_id:
+            return f"Quick command '/{command}' has no cron job defined."
+
+        job = get_job(job_id)
+        if not job:
+            return f"Quick command '/{command}' references unknown cron job '{job_id}'."
+
+        try:
+            success, output, final_response, error = await asyncio.to_thread(run_job, job)
+        except Exception as exc:
+            await asyncio.to_thread(mark_job_run, job["id"], False, str(exc), delivery_error=None)
+            return f"Quick command '/{command}' failed while running cron job '{job_id}': {exc}"
+
+        await asyncio.to_thread(save_job_output, job["id"], output)
+
+        deliver_content = final_response if success else f"⚠️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
+        should_deliver = bool(deliver_content)
+        if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
+            should_deliver = False
+
+        delivery_error = None
+        if should_deliver:
+            loop = asyncio.get_running_loop()
+            delivery_error = await asyncio.to_thread(
+                _deliver_result,
+                job,
+                deliver_content,
+                adapters=self.adapters,
+                loop=loop,
+            )
+
+        await asyncio.to_thread(mark_job_run, job["id"], success, error, delivery_error=delivery_error)
+
+        if delivery_error:
+            return f"Quick command '/{command}' failed to deliver cron job '{job_id}': {delivery_error}"
+        if not success:
+            return f"Quick command '/{command}' failed while running cron job '{job_id}': {error}"
+        return None
+
     async def _handle_reset_command(self, event: MessageEvent) -> str:
         """Handle /new or /reset command."""
         source = event.source
@@ -5842,11 +5923,8 @@ class GatewayRunner:
         # restarts us.  The detached subprocess approach (setsid + bash)
         # doesn't work under systemd because KillMode=mixed kills all
         # processes in the cgroup, including the detached helper.
-        _under_service = bool(os.environ.get("INVOCATION_ID"))  # systemd sets this
-        if _under_service:
-            self.request_restart(detached=False, via_service=True)
-        else:
-            self.request_restart(detached=True, via_service=False)
+        service_managed = _is_service_managed_gateway_process()
+        self.request_restart(detached=not service_managed, via_service=service_managed)
         if active_agents:
             return f"⏳ Draining {active_agents} active agent(s) before restart..."
         return "♻ Restarting gateway. If you aren't notified within 60 seconds, restart from the console with `hermes gateway restart`."
